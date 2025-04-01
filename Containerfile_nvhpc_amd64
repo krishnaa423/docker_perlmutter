@@ -1,0 +1,301 @@
+FROM nvcr.io/nvidia/nvhpc:25.3-devel-cuda12.8-ubuntu22.04
+
+# Dockerfile variables.
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PS1='\[\e[0;32m\]\u@\h:\[\e[0;34m\]\w\[\e[0m\]\$ '
+ENV LS_COLORS='di=1;34:ln=1;36:so=1;35:pi=33:ex=1;32:bd=1;33;40:cd=1;33;40:su=37;41:sg=30;43:tw=30;42:ow=30;43'
+# aliases:
+# alias ls='ls --color=auto'
+# alias cdw='cd $COMMON'
+# alias cds='cd $SCRATCH'
+# alias cdh='cd $HOME'
+# alias status="clear && squeue -u krishnaa"
+ENV SHELL=/bin/sh
+# ENV GCC_VER=13.2.1 for perlmutter module load. 
+ENV GCC_VER=13.2.1
+ENV CONDA_ROOT=$SCRATCH/miniconda
+ENV PATH=$CONDA_ROOT/bin:$PATH
+
+ENV CUDA_CC=80
+ENV NVHPC_VER=24.5
+ENV CUDA_VER=12.4
+ENV NVHPC_ROOT=/opt/nvhpc/hpc_sdk/Linux_x86_64/$NVHPC_VER
+ENV CUDA_ROOT=/opt/nvhpc/hpc_sdk/Linux_x86_64/$NVHPC_VER/cuda/$CUDA_VER
+ENV SCRATCH=/usr/local
+ENV MPI_ROOT=$SCRATCH
+
+ENV PATH=$SCRATCH/bin:$MPI_ROOT/bin:$NVHPC_ROOT/compilers/bin:$NVHPC_ROOT/cuda/bin:$PATH
+ENV CPATH=$SCRATCH/include:$MPI_ROOT/include:$NVHPC_ROOT/compilers/include:$NVHPC_ROOT/cuda/include:$NVHPC_ROOT/math_libs/include
+ENV LIBRARY_PATH=$SCRATCH/lib:$MPI_ROOT/lib:$NVHPC_ROOT/compilers/lib:$NVHPC_ROOT/cuda/lib64:$NVHPC_ROOT/cuda/lib64/stubs:$NVHPC_ROOT/math_libs/lib64
+ENV LD_LIBRARY_PATH=$SCRATCH/lib:$MPI_ROOT/lib:$NVHPC_ROOT/compilers/lib:$NVHPC_ROOT/cuda/lib64:$NVHPC_ROOT/cuda/lib64/stubs:$NVHPC_ROOT/math_libs/lib64
+
+# common apt. 
+RUN mkdir -p /app \
+&& apt update  \
+&& apt install -y \
+  build-essential \ 
+  software-properties-common \
+  libssl-dev \
+  bison \
+  flex \
+  nasm \ 
+  gfortran \ 
+  python3 \
+  python3-pip \
+  cmake \ 
+  cmake-curses-gui \ 
+  ninja-build \
+  meson \
+  autoconf \ 
+  libtool \ 
+  pkg-config \ 
+  wget \ 
+  curl \ 
+  vim \ 
+  git \ 
+  libgl1-mesa-dev \ 
+  libglu1-mesa-dev \ 
+  libgl1-mesa-glx \
+  libgtk-4-dev libgirepository1.0-dev libcairo2-dev gir1.2-glib-2.0 \
+  qt6-base-dev qt6-tools-dev qt6-tools-dev-tools \
+  tzdata 
+
+# common python. 
+RUN cd /app \
+&& ln -sf /usr/bin/python3 /usr/bin/python \
+&& ln -sf /usr/bin/pip3 /usr/bin/pip \
+&& pip3 install cmake ninja cython
+
+# miniconda. 
+RUN cd /app \
+&& wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+&& chmod +x miniconda.sh \
+&& bash miniconda.sh -b -p $CONDA_ROOT \
+&& rm -rf miniconda.sh 
+
+# numpy, jax, xarray, pandas, scipy, sympy. 
+RUN cd /app \
+&& pip3 install numpy jax xarray pandas scipy sympy 
+
+# mpich, mpi4py. 
+RUN cd /app \
+&& wget -O mpich.tar.gz https://github.com/pmodels/mpich/releases/download/v4.2.2/mpich-4.2.2.tar.gz \
+&& tar -xzvf mpich.tar.gz && mv mpich-* mpich \
+&& cd mpich \
+&& ./autogen.sh \
+&& CC=nvc CXX=nvc++ FC=nvfortran ./configure --prefix=$MPI_ROOT --with-cuda=$NVHPC_ROOT/cuda  \
+&& make -j8 && make install \
+&& cd .. \
+&& rm -rf mpich* \
+&& MPICC=mpicc CC=nvc CFLAGS="-noswitcherror" pip3 install --no-binary=mpi4py mpi4py==4.0.0
+
+# scalapack. 
+COPY SLmake.inc_nvhpc /app/
+RUN cd /app \
+&& wget -O scalapack.tar.gz https://github.com/Reference-ScaLAPACK/scalapack/archive/refs/tags/v2.2.2.tar.gz \
+&& tar -xzvf scalapack.tar.gz && mv scalapack-* scalapack \
+&& cd scalapack \
+&& cp ../SLmake.inc* ./SLmake.inc \
+&& make lib \
+&& cp ./libscalapack.a $SCRATCH/lib/libscalapack.a \
+&& cd .. \
+&& rm -rf scalapack* SLmake.inc*
+
+# elpa. 
+RUN cd /app \
+&& wget -O elpa.tar.gz https://github.com/marekandreas/elpa/archive/refs/tags/new_release_2024.05.001.tar.gz \
+&& tar -xzvf elpa.tar.gz && mv elpa-* elpa \
+&& cd elpa \
+&& ./autogen.sh \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure \
+    --prefix=$SCRATCH \
+    --enable-nvidia-gpu-kernels \
+    --with-cuda-path=$NVHPC_ROOT/cuda \
+    --with-NVIDIA-GPU-compute-capability=sm_$CUDA_CC  \
+    LDFLAGS="-L$SCRATCH/lib -L$NVHPC_ROOT/compilers/lib" \
+    LIBS="$SCRATCH/lib/libscalapack.a $NVHPC_ROOT/compilers/lib/liblapack.a $NVHPC_ROOT/compilers/lib/libblas.a -lstdc++ -lcudart" \
+    CFLAGS="-O3 -fPIC" \
+    --disable-sse \
+    # --disable-sse-assembly \
+    --disable-avx --disable-avx2 --disable-avx512 \
+    --disable-shared \
+&& make -j8 && make install \
+&& ln -sf $SCRATCH/include/elpa-*/elpa $SCRATCH/include/elpa \
+&& cp $SCRATCH/include/elpa-*/modules/* $SCRATCH/include/ \
+&& cd .. \
+&& rm -rf elpa* 
+
+# fftw. 
+RUN cd /app \
+&& wget -O fftw3.tar.gz https://fftw.org/fftw-3.3.10.tar.gz \
+&& tar -xzvf fftw3.tar.gz && mv fftw-* fftw3 \
+&& cd fftw3 \
+&& autoreconf -i \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH CFLAGS="-fPIC" FCFLAGS="-fPIC" --enable-shared --enable-openmp --enable-mpi \
+&& make -j8 && make install \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH CFLAGS="-fPIC" FCFLAGS="-fPIC" --enable-shared --enable-openmp --enable-mpi --enable-single \
+&& make -j8 && make install \
+&& cd .. \
+&& rm -rf fftw3* 
+
+# zlib. 
+RUN cd /app \
+&& wget -O zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
+&& tar -xzvf zlib.tar.gz && mv zlib-* zlib \
+&& cd zlib \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH \
+&& make -j8 && make install \
+&& cd .. \
+&& rm -rf zlib*
+
+# hdf5, h5py. 
+RUN cd /app \
+&& wget -O hdf5.tar.gz https://github.com/HDFGroup/hdf5/archive/refs/tags/hdf5_1.14.6.tar.gz \
+&& tar -xzvf hdf5.tar.gz && mv hdf5-* hdf5 \
+&& cd hdf5 \
+&& mkdir build \
+&& cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$SCRATCH -DHDF5_BUILD_FORTRAN=ON -DHDF5_ENABLE_PARALLEL=ON -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
+&& cmake --build build \
+&& cmake --install build \
+&& cd .. \
+&& rm -rf hdf5* \
+&& CC=mpicc HDF5_MPI="ON" HDF5_DIR="$SCRATCH"  pip3 install --no-binary=h5py h5py
+
+# qe, west, westpy.
+COPY ./kmesh.pl ./qe_nvhpc_gpu_make.inc ./qe_nvhpc_cpu_make.inc /app/
+RUN cd /app \
+&& source ~/.bashrc \
+# qe gpu. 
+&& wget -O qe.tar.gz https://gitlab.com/QEF/q-e/-/archive/qe-7.3.1/q-e-qe-7.3.1.tar.gz \
+&& tar -xzvf qe.tar.gz && mv q-e-* qe \
+&& tar -xzvf qe.tar.gz && mv q-e-* qe-cpu \
+&& cd qe \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure \
+    --prefix=$SCRATCH \
+    --with-hdf5=yes \
+    # --with-scalapack=yes \
+    --with-cuda=$NVHPC_ROOT/cuda \
+    --with-cuda-cc=$CUDA_CC \ 
+    --with-cuda-runtime=$CUDA_VER \
+    --enable-debug \
+&& cp /app/qe_nvhpc_gpu_make.inc /app/qe/make.inc \
+&& make all -j8 || true && make all -j8 && make epw -j8 \
+# west.
+&& wget -O West.tar.gz https://github.com/west-code-development/West/archive/refs/tags/v6.2.0.tar.gz \
+&& tar -xzvf West.tar.gz && mv West-* West \
+&& cd ./West \
+&& CC=mpicc F90=mpif90 MPIF90=mpif90 BLAS_LIBS="-L$SCRATCH -lopenblas" LAPACK_LIBS="-L/usr/local -lopenblas" LIBDIRS="-L$SCRATCH " make conf PYT=python3 PYT_LDFLAGS="`python3-config --ldflags --embed`" \
+&& make all -j8 \
+&& cd .. \
+&& make install \
+&& cd .. \
+# qe-cpu. 
+&& cd qe-cpu \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure \
+    --prefix=$(pwd) \
+    --with-hdf5=yes \
+    --with-scalapack=yes \ 
+    #  --enable-debug \
+&& cp /app/qe_nvhpc_cpu_make.inc /app/qe-cpu/make.inc \
+&& make all -j8 || true && make all -j8 && make epw -j8 \
+&& cd .. \
+# westpy. 
+&& wget -O westpy.tar.gz https://github.com/west-code-development/westpy/archive/refs/tags/v6.2.0.tar.gz \
+&& tar -xzvf westpy.tar.gz && mv westpy-* westpy \
+&& cd westpy \
+&& pip install . \
+&& cd .. \
+&& cp ./kmesh.pl $SCRATCH/bin/kmesh.pl \
+&& rm -rf westpy* qe qe.tar.gz kmesh.pl 
+
+# bgw, bgwpy, bgwtools. 
+COPY ./arch_nvhpc_gpu.mk ./arch_nvhpc_cpu.mk /app/
+RUN cd /app \
+# Below link obtained from berkeleygw.org website. 
+&& wget -O bgw.tar.gz https://app.box.com/shared/static/22edl07muvhfnd900tnctsjjftbtcqc4.gz \
+&& tar -xzvf bgw.tar.gz && mv BerkeleyGW* bgw \
+&& tar -xzvf bgw.tar.gz && mv BerkeleyGW* bgw-cpu \
+# bgw gpu. 
+&& cd bgw \
+&& cp ../arch_nvhpc_gpu.mk ./arch.mk \
+&& make all-flavors -j8 \
+&& make install INSTDIR=$SCRATCH \
+&& cd .. \
+# bgw cpu. 
+&& cd bgw-cpu \
+&& cp ../arch_nvhpc_cpu.mk ./arch.mk \
+&& make all-flavors -j8 || true && make all-flavors -j8 \
+&& cd .. \
+&& rm -rf arch* bgw bgw.tar.gz  
+# # bgwpy, bgwtools. 
+# && git clone https://github.com/BerkeleyGW/BGWpy.git && mv BGWpy bgwpy \
+# && git clone https://github.com/BerkeleyGW/bgwtools.git \
+# && cd bgwpy \
+# && pip install . \
+# && cd .. \
+# && cd bgwtools \
+# && pip install . \
+# && cd .. \
+# && rm -rf bgw* 
+
+# scikit-learn, joblib, xgboost. 
+# torch, torchvision, torchaudio, torch_geometric, torch_cluster, lightning, tensorly. 
+# tensorboard, torchserve. 
+# transformers, accelerate, evaluate, diffusers, e3nn. 
+RUN cd /app \
+&& apt install -y ffmpeg \
+&& pip3 install scikit-learn joblib xgboost \
+&& pip3 install torch torchvision torchaudio torch_geometric torch_cluster \
+&& pip3 install lightning tensorly \
+&& pip3 install tensorboard torch-serve torch-model-archiver \
+&& pip3 install transformers accelerate evaluate diffusers e3nn
+
+# gui, plotting: ffmpeg, matplotlib, seaborn, vtk, pyvista[qt], pyvistaqt. 
+RUN cd /app \
+&& conda install -y -c conda-forge vtk  \
+&& pip3 install matplotlib seaborn vtk pyvista[qt] pyvistaqt 
+
+# data and io libraries python:
+# dask, lark, pywavelets, networkx. 
+# dill, pyyaml, xmltodict, sqlite, jupyterlab, fastapi, pyopengl. 
+RUN cd /app \
+&& pip3 install dask[complete] dask_mpi \
+&& pip3 install lark-parser pywavelets networkx dill pyyaml xmltodict sqlite \
+&& pip3 install jupyterlab fastapi \
+&& pip3 install pyopengl --no-build-isolation 
+
+# fp libraries:
+# ase, gpaw, qutip, astropy, deephpack, hpro, pyscf.  
+COPY ./DeepH-pack.tar.gz ./HPRO.tar.gz /app/
+RUN cd /app \
+&& pip3 install ase gpaw qutip astropy \
+&& pip3 install --prefer-binary pyscf \
+# deephpack. 
+&& pip3 install pathos \ 
+&& apt update -y && apt install -y cargo \
+&& cargo install juliaup --locked \
+&& julia -e 'using Pkg; \
+  Pkg.add("Arpack"); \
+  Pkg.add("HDF5"); \
+  Pkg.add("ArgParse"); \
+  Pkg.add("JLD"); \
+  Pkg.add("JSON"); \
+  Pkg.add("IterativeSolvers"); \
+  Pkg.add("DelimitedFiles"); \
+  Pkg.add("StaticArrays"); \
+  Pkg.add("LinearMaps"); \
+  Pkg.add("Pardiso");' \
+&& tar -xzvf DeepH-pack.tar.gz && cd DeepH-pack \
+&& pip3 install . \
+&& cd .. \
+&& rm -rf DeepH-pack* \
+# hpro. 
+&& tar-xzvf HPRO.tar.gz && cd HPRO/src \
+&& pip3 install . \
+&& cd ../../ \
+&& rm -rf HPRO* 
+ENV PATH="~/.cargo:$PATH"
+
+# fix e3nn. 
+RUN cd /app \
+&& pip3 install --force-reinstall --no-deps --no-cache e3nn 
