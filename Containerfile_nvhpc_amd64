@@ -71,11 +71,12 @@ RUN cd /app \
 && wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
 && chmod +x miniconda.sh \
 && bash miniconda.sh -b -p $CONDA_ROOT \
+# && $HOME/miniconda/bin/conda init \
 && rm -rf miniconda.sh 
 
-# numpy, jax, xarray, pandas, scipy, sympy. 
+# numpy, jax, xarray, pandas, scipy, sympy, cupy
 RUN cd /app \
-&& pip3 install numpy jax xarray pandas scipy sympy 
+&& pip3 install numpy jax xarray pandas scipy sympy cupy
 
 # mpich, mpi4py. 
 RUN cd /app \
@@ -139,11 +140,12 @@ RUN cd /app \
 && rm -rf fftw3* 
 
 # zlib. 
+# Perlmutter: Already has inbuilt. Not using the system one causes loading errors. 
 RUN cd /app \
 && wget -O zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz \
 && tar -xzvf zlib.tar.gz && mv zlib-* zlib \
 && cd zlib \
-&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH \
+&& CC=mpicc CXX=mpic++ FC=mpif90 CFLAGS="-fPIC" CXXFLAGS="-fPIC" FCFLAGS="-fPIC" ./configure --prefix=$SCRATCH \
 && make -j8 && make install \
 && cd .. \
 && rm -rf zlib*
@@ -154,7 +156,14 @@ RUN cd /app \
 && tar -xzvf hdf5.tar.gz && mv hdf5-* hdf5 \
 && cd hdf5 \
 && mkdir build \
-&& cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$SCRATCH -DHDF5_BUILD_FORTRAN=ON -DHDF5_ENABLE_PARALLEL=ON -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
+&& cmake -S . -B build \
+  -DCMAKE_INSTALL_PREFIX=$SCRATCH \
+  -DCMAKE_C_COMPILER=mpicc \
+  -DCMAKE_CXX_COMPILER=mpic++ \
+  -DCMAKE_Fortran_COMPILER=mpif90 \
+  -DHDF5_BUILD_FORTRAN=ON \
+  -DHDF5_ENABLE_PARALLEL=ON \
+  -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
 && cmake --build build \
 && cmake --install build \
 && cd .. \
@@ -179,7 +188,7 @@ RUN cd /app \
     --with-cuda-runtime=$CUDA_VER \
     --enable-debug \
 && cp /app/qe_nvhpc_gpu_make.inc /app/qe/make.inc \
-&& make all -j8 || true && make all -j8 && make epw -j8 \
+&& make all -j8 || true && make all -j8 \
 # west.
 && wget -O West.tar.gz https://github.com/west-code-development/West/archive/refs/tags/v6.2.0.tar.gz \
 && tar -xzvf West.tar.gz && mv West-* West \
@@ -216,6 +225,7 @@ RUN cd /app \
 && tar -xzvf bgw.tar.gz && mv BerkeleyGW* bgw \
 && tar -xzvf bgw.tar.gz && mv BerkeleyGW* bgw-cpu \
 # bgw gpu. 
+# Perlmutter: Adding -Wl,--start-group and -Wl,--end-group for hdf5 libraries and making them shared seemed to help. 
 && cd bgw \
 && cp ../arch_nvhpc_gpu.mk ./arch.mk \
 && make all-flavors -j8 \

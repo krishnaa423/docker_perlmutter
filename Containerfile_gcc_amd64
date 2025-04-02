@@ -1,4 +1,5 @@
 FROM docker.io/ubuntu:22.04 
+# FROM docker.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 
 # Dockerfile variables.
 ENV DEBIAN_FRONTEND=noninteractive
@@ -63,6 +64,7 @@ RUN cd /app \
 && wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
 && chmod +x miniconda.sh \
 && bash miniconda.sh -b -p $CONDA_ROOT \
+# && $HOME/miniconda/bin/conda init \
 && rm -rf miniconda.sh 
 
 # cmake. 
@@ -89,9 +91,9 @@ RUN cd /app \
 RUN cd /app \
 && source ~/.bashrc \
 && wget -O openblas.tar.gz https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.29/OpenBLAS-0.3.29.tar.gz \
-&& tar-xzvf openblas.tar.gz && mv OpenBLAS-* openblas \
+&& tar -xzvf openblas.tar.gz && mv OpenBLAS-* openblas \
 && cd openblas \
-&& make USE_OPENMP=1 COMMON_OPT="-fPIC" -j8 \
+&& CC=gcc CXX=g++ FC=gfortran make USE_OPENMP=1 COMMON_OPT="-fPIC" -j8 \
 && make install PREFIX=$SCRATCH \
 && cd .. \
 && rm -rf openblas* 
@@ -130,7 +132,15 @@ RUN cd /app \
 && tar -xzvf elpa.tar.gz && mv elpa-* elpa \
 && cd elpa \
 && ./autogen.sh \
-&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH --disable-sse --disable-sse-assembly --disable-avx --disable-avx2 --disable-avx512 CFLAGS="-O3 -fPIC" LDFLAGS="-L$SCRATCH/lib" LIBS="-lscalapack -lopenblas" \
+&& CC=mpicc CXX=mpic++ FC=mpif90 ./configure \
+  --prefix=$SCRATCH \
+  --disable-sse \
+  --disable-sse-assembly \
+  --disable-avx --disable-avx2 --disable-avx512 \
+  CFLAGS="-O3 -fPIC" \
+  LDFLAGS="-L$SCRATCH/lib" \
+  LIBS="-lscalapack -lopenblas" \
+  # LIBS="$SCRATCH/libscalapack.a $SCRATCH/libopenblas.a" \
 && make -j8 && make install \
 && ln -sf $SCRATCH/include/elpa-*/elpa $SCRATCH/include/elpa \
 && cp $SCRATCH/include/elpa-*/modules/* $SCRATCH/include/ \
@@ -166,7 +176,14 @@ RUN cd /app \
 && tar -xzvf hdf5.tar.gz && mv hdf5-* hdf5 \
 && cd hdf5 \
 && mkdir build \
-&& cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$SCRATCH -DHDF5_BUILD_FORTRAN=ON -DHDF5_ENABLE_PARALLEL=ON -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
+&& cmake -S . -B build \
+  -DCMAKE_INSTALL_PREFIX=$SCRATCH \
+  -DHDF5_BUILD_FORTRAN=ON \
+  -DHDF5_ENABLE_PARALLEL=ON \
+  -DHDF5_ENABLE_ZLIB_SUPPORT=ON \
+  -DCMAKE_C_COMPILER=mpicc \
+  -DCMAKE_CXX_COMPILER=mpic++ \
+  -DCMAKE_Fortran_COMPILER=mpif90 \
 && cmake --build build \
 && cmake --install build \
 && cd .. \
@@ -209,6 +226,9 @@ RUN cd /app \
 && mv petsc-* petsc \
 && cd petsc \
 && ./configure --prefix=$SCRATCH --with-scalar-type=complex --with-hdf5-dir=$SCRATCH \
+  --with-cc=mpicc \
+  --with-cxx=mpic++ \
+  --with-fc=mpif90 \
 && make -j8 && make install \
 && cd .. \
 && rm -rf petsc* \
@@ -236,6 +256,17 @@ RUN cd /app \
 && cd .. \
 && rm -rf slepc4py* 
 
+# libxc.
+RUN cd /app \
+&& wget -O libxc.tar.gz https://gitlab.com/libxc/libxc/-/archive/7.0.0/libxc-7.0.0.tar.bz2 \
+&& tar -xvf libxc.tar.gz && mv libxc-* libxc \
+&& cd libxc \
+&& autoreconf -i \
+&& CC=mpicc FC=mpif90 ./configure CFLAGS="-fPIC" --prefix=$SCRATCH \
+&& make -j8 && make install \
+&& cd .. \
+&& rm -rf libxc* 
+
 # qe, west, westpy.
 COPY ./kmesh.pl  /app/
 RUN cd /app \
@@ -250,7 +281,7 @@ RUN cd /app \
 && wget -O West.tar.gz https://github.com/west-code-development/West/archive/refs/tags/v6.2.0.tar.gz \
 && tar -xzvf West.tar.gz && mv West-* West \
 && cd ./West \
-&& CC=mpicc F90=mpif90 MPIF90=mpif90 BLAS_LIBS="-L$SCRATCH -lopenblas" LAPACK_LIBS="-L/usr/local -lopenblas" LIBDIRS="-L$SCRATCH " make conf PYT=python3 PYT_LDFLAGS="`python3-config --ldflags --embed`" \
+&& CC=mpicc F90=mpif90 MPIF90=mpif90 BLAS_LIBS="-L$SCRATCH -lopenblas" LAPACK_LIBS="-L$SCRATCH -lopenblas" LIBDIRS="-L$SCRATCH " make conf PYT=python3 PYT_LDFLAGS="`python3-config --ldflags --embed`" \
 && make all -j8 \
 && cd .. \
 && make install \
@@ -270,17 +301,17 @@ RUN cd /app \
 && tar -xzvf abinit.tar.gz && mv abinit-* abinit \
 && cd abinit \
 && ./autogen.sh \
+--with-fftw3="yes" \
+--with-fft-flavor="fftw3" \
 && CC=mpicc CXX=mpic++ FC=mpif90 ./configure --prefix=$SCRATCH \
-  # --with-mpi="yes" \
-  # --enable-mpi-io="yes" \
-  # --with-linalg-flavor="openblas+netlib" \
-  # LINALG_LIBS="-L$SCRATCH -lelpa -lscalapack -lopenblas" \
-  # --with-fftw3="yes" \
-  # --with-fft-flavor="fftw3" \
-  # --with-libxc="yes" \
-  # --with-hdf5="yes" \
-  # --with-netcdf="yes" \
-  # --with-netcdf-fortran="yes" \
+  --with-mpi="yes" \
+  --enable-mpi-io="yes" \
+  --with-linalg-flavor="openblas+netlib" \
+  LINALG_LIBS="-L$SCRATCH -lelpa -lscalapack -lopenblas" \
+  --with-libxc="yes" \
+  --with-hdf5="yes" \
+  --with-netcdf="yes" \
+  --with-netcdf-fortran="yes" \
 && make -j8 \
 && make install \
 && cd .. \
@@ -313,6 +344,7 @@ RUN cd /app \
   -DSIESTA_WITH_LIBXC=ON \
   -DSIESTA_WITH_ELPA=ON \
   -DSIESTA_WITH_FLOOK=OFF \
+  -DSIESTA_WITH_ELSI=OFF \
   -DCMAKE_C_COMPILER=mpicc \
   -DCMAKE_CXX_COMPILER=mpic++ \
   -DCMAKE_Fortran_COMPILER=mpif90 \
@@ -327,7 +359,8 @@ RUN cd /app \
 && tar -xzvf abacus.tar.gz && mv abacus-develop-* abacus \
 && cd abacus \
 && mkdir -p build \
-&& CXX=mpic++ cmake -B build -DCMAKE_INSTALL_PREFIX=$SCRATCH \
+&& cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$SCRATCH -DCMAKE_CXX_COMPILER=mpic++ \
+  # -DUSE_ELPA=OFF \
 && cmake --build build -j8 \
 && cmake --install build \
 && cd .. \
@@ -344,7 +377,7 @@ RUN cd /app \
 && tar -xzvf patch.tar.gz && rm -rf patch.tar.gz \
 && cp ../../openmx_makefile ./makefile \
 && make \
-&& cp ./openmx $SCRATCH/openmx \
+&& cp ./openmx $SCRATCH//bin/openmx \
 && cd ../../ \
 && rm -rf openmx* patch* 
 
@@ -465,18 +498,18 @@ RUN cd /app \
 # dill, pyyaml, xmltodict, sqlite, jupyterlab, fastapi, pyopengl. 
 RUN cd /app \
 && pip3 install dask[complete] dask_mpi \
-&& pip3 install lark-parser pywavelets networkx dill pyyaml xmltodict sqlite \
+&& pip3 install lark pywavelets networkx dill pyyaml xmltodict sqlite \
 && pip3 install jupyterlab fastapi \
 && pip3 install pyopengl --no-build-isolation 
 
 # fp libraries:
 # ase, gpaw, qutip, astropy, deephpack, hpro, pyscf.  
-COPY ./DeepH-pack.tar.gz ./HPRO.tar.gz /app/
+COPY ./siteconfig_testing.py ./DeepH-pack.tar.gz ./HPRO.tar.gz /app/
 RUN cd /app \
 && pip3 install ase gpaw qutip astropy \
 && pip3 install --prefer-binary pyscf \
 # deephpack. 
-&& pip3 install pathos \ 
+&& pip3 install pathos \  
 && apt update -y && apt install -y cargo \
 && cargo install juliaup --locked \
 && julia -e 'using Pkg; \
@@ -498,7 +531,16 @@ RUN cd /app \
 && tar-xzvf HPRO.tar.gz && cd HPRO/src \
 && pip3 install . \
 && cd ../../ \
-&& rm -rf HPRO* 
+&& rm -rf HPRO* \
+# gpaw. 
+&& cd /app \
+&& git clone https://gitlab.com/gpaw/gpaw.git \
+&& cd gpaw \
+&& cp ../siteconfig_testing.py ./siteconfig.py \
+&& pip3 install . \
+&& cd .. \
+&& rm -rf siteconfig* gpaw* \
+&& yes | gpaw install-data /root/gpaw-data 
 ENV PATH="~/.cargo:$PATH"
 
 # fix e3nn. 
